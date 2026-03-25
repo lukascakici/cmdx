@@ -98,6 +98,14 @@ class EventInterceptor: ObservableObject {
         vIsCutPending = false
     }
     
+    /// Call on app termination to clear stale cut files from pasteboard
+    func cleanup() {
+        if cutPasteboardChangeCount >= 0 && NSPasteboard.general.changeCount == cutPasteboardChangeCount {
+            NSPasteboard.general.clearContents()
+        }
+        cutPasteboardChangeCount = -1
+    }
+    
     // MARK: - Permission Monitoring
     
     private func startPermissionMonitor() {
@@ -220,6 +228,16 @@ class EventInterceptor: ObservableObject {
                 let optUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false)
                 optUp?.flags = .maskCommand
                 optUp?.post(tap: loc)
+                
+                // Clear pasteboard after Finder completes the move
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self = self else { return }
+                    if self.cutPasteboardChangeCount >= 0 
+                        && NSPasteboard.general.changeCount == self.cutPasteboardChangeCount {
+                        NSPasteboard.general.clearContents()
+                        self.cutPasteboardChangeCount = -1
+                    }
+                }
                 
                 return nil // Swallow original Cmd+V
             }
