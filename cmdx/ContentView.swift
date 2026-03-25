@@ -60,6 +60,7 @@ class EventInterceptor: ObservableObject {
     
     private var xIsCutPending = false
     private var vIsCutPending = false
+    private var lastCutTime = Date.distantPast
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         guard type == .keyDown || type == .keyUp else { return Unmanaged.passRetained(event) }
@@ -87,46 +88,38 @@ class EventInterceptor: ObservableObject {
             return Unmanaged.passRetained(event)
         }
         
-        // Command+V OR releasing V
-        if (isCmdPressed && keyCode == kVK_ANSI_V) || (keyCode == kVK_ANSI_V && vIsCutPending) {
-            if isCutPending || vIsCutPending {
-                if type == .keyDown {
-                    vIsCutPending = true
-                    
-                    let source = CGEventSource(stateID: .privateState)
-                    let loc = CGEventTapLocation.cghidEventTap
-                    
-                    // 1. Post Option Down
-                    let optDown = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: true)
-                    optDown?.flags = [.maskCommand, .maskAlternate]
-                    optDown?.post(tap: loc)
-                    
-                    // 2. Post V Down (with Option+Cmd flag)
-                    let vDown = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: true)
-                    vDown?.flags = [.maskCommand, .maskAlternate]
-                    vDown?.post(tap: loc)
-                    
-                    // 3. Post V Up
-                    let vUp = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: false)
-                    vUp?.flags = [.maskCommand, .maskAlternate]
-                    vUp?.post(tap: loc)
-                    
-                    // 4. Post Option Up
-                    let optUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false)
-                    optUp?.flags = .maskCommand
-                    optUp?.post(tap: loc)
-                    
-                    isCutPending = false
-                    
-                    // Clear the pasteboard after a 0.5s delay to prevent pasting again
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        NSPasteboard.general.clearContents()
-                    }
-                } else if type == .keyUp {
-                    vIsCutPending = false
-                }
+        // Command+V
+        if keyCode == kVK_ANSI_V {
+            // First time pressing Cmd+V after a cut
+            if isCmdPressed && isCutPending && type == .keyDown {
+                isCutPending = false
+                vIsCutPending = true
+                lastCutTime = Date()
                 
-                // Swallow completely -> we generated our own full key sequence for V!
+                // Mutate V to Option+V so Finder sees Cmd+Option+V
+                event.flags.insert(.maskAlternate)
+                
+                // Clear pasteboard after Finder reads it
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    NSPasteboard.general.clearContents()
+                }
+                return Unmanaged.passRetained(event)
+            }
+            
+            // Key repeat of V while holding Cmd+V from the cut paste
+            if isCmdPressed && vIsCutPending && type == .keyDown {
+                return nil // Swallow multi-fires
+            }
+            
+            // Releasing V after the cut paste. Mutate so Finder gets Option+Cmd+V UP
+            if vIsCutPending && type == .keyUp {
+                vIsCutPending = false
+                event.flags.insert(.maskAlternate)
+                return Unmanaged.passRetained(event)
+            }
+            
+            // If they quickly press Cmd+V AGAIN within 0.5s of pasting, swallow it to prevent accidental double-pastes/copies
+            if isCmdPressed && Date().timeIntervalSince(lastCutTime) < 0.5 {
                 return nil
             }
         }
