@@ -65,7 +65,6 @@ class EventInterceptor: ObservableObject {
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         guard type == .keyDown || type == .keyUp else { return Unmanaged.passRetained(event) }
         
-        // Check if frontmost app is Finder
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" {
             return Unmanaged.passRetained(event)
         }
@@ -74,7 +73,15 @@ class EventInterceptor: ObservableObject {
         let isCmdPressed = flags.contains(.maskCommand)
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         
-        // Command+X OR releasing X after Command+X
+        // Standard Cmd+C
+        if isCmdPressed && keyCode == kVK_ANSI_C && type == .keyDown {
+            isCutPending = false
+            xIsCutPending = false
+            vIsCutPending = false
+            return Unmanaged.passRetained(event)
+        }
+        
+        // Command+X
         if (isCmdPressed && keyCode == kVK_ANSI_X) || (keyCode == kVK_ANSI_X && xIsCutPending) {
             if type == .keyDown {
                 isCutPending = true
@@ -82,53 +89,59 @@ class EventInterceptor: ObservableObject {
             } else if type == .keyUp {
                 xIsCutPending = false
             }
-            
-            // Mutate in-place to C
             event.setIntegerValueField(.keyboardEventKeycode, value: Int64(kVK_ANSI_C))
             return Unmanaged.passRetained(event)
         }
         
         // Command+V
         if keyCode == kVK_ANSI_V {
-            // First time pressing Cmd+V after a cut
             if isCmdPressed && isCutPending && type == .keyDown {
                 isCutPending = false
                 vIsCutPending = true
                 lastCutTime = Date()
                 
-                // Mutate V to Option+V so Finder sees Cmd+Option+V
-                event.flags.insert(.maskAlternate)
+                let source = CGEventSource(stateID: .hidSystemState)
+                let loc = CGEventTapLocation.cghidEventTap
                 
-                // Clear pasteboard after Finder reads it
+                // Option down
+                let optDown = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: true)
+                optDown?.flags = [.maskCommand, .maskAlternate]
+                optDown?.post(tap: loc)
+                
+                // V down
+                let vDown = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: true)
+                vDown?.flags = [.maskCommand, .maskAlternate]
+                vDown?.post(tap: loc)
+                
+                // V up
+                let vUp = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: false)
+                vUp?.flags = [.maskCommand, .maskAlternate]
+                vUp?.post(tap: loc)
+                
+                // Option up
+                let optUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false)
+                optUp?.flags = .maskCommand
+                optUp?.post(tap: loc)
+                
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     NSPasteboard.general.clearContents()
                 }
-                return Unmanaged.passRetained(event)
+                
+                return nil // Swallow original hardware stroke
             }
             
-            // Key repeat of V while holding Cmd+V from the cut paste
             if isCmdPressed && vIsCutPending && type == .keyDown {
-                return nil // Swallow multi-fires
+                return nil 
             }
             
-            // Releasing V after the cut paste. Mutate so Finder gets Option+Cmd+V UP
             if vIsCutPending && type == .keyUp {
                 vIsCutPending = false
-                event.flags.insert(.maskAlternate)
-                return Unmanaged.passRetained(event)
-            }
-            
-            // If they quickly press Cmd+V AGAIN within 0.5s of pasting, swallow it to prevent accidental double-pastes/copies
-            if isCmdPressed && Date().timeIntervalSince(lastCutTime) < 0.5 {
                 return nil
             }
-        }
-        
-        // Standard Cmd+C cancels pending cut
-        if isCmdPressed && keyCode == kVK_ANSI_C && type == .keyDown {
-            isCutPending = false
-            xIsCutPending = false
-            vIsCutPending = false
+            
+            if isCmdPressed && type == .keyDown && Date().timeIntervalSince(lastCutTime) < 0.5 {
+                return nil
+            }
         }
         
         return Unmanaged.passRetained(event)
