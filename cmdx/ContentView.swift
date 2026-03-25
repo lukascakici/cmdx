@@ -130,6 +130,7 @@ class EventInterceptor: ObservableObject {
     
     private var xIsCutPending = false
     private var vIsCutPending = false
+    private var cutPasteboardChangeCount: Int = -1
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Re-enable tap if system disabled it due to timeout
@@ -165,7 +166,7 @@ class EventInterceptor: ObservableObject {
         }
         
         // Command+X → rewrite to Cmd+C and mark cut pending
-        if (isCmdPressed && keyCode == kVK_ANSI_X) || (keyCode == kVK_ANSI_X && xIsCutPending) {
+        if isCmdPressed && keyCode == kVK_ANSI_X {
             if type == .keyDown {
                 isCutPending = true
                 xIsCutPending = true
@@ -176,12 +177,19 @@ class EventInterceptor: ObservableObject {
             return Unmanaged.passRetained(event)
         }
         
+        // Handle X key-up when Cmd was already released (from the Cmd+X press)
+        if keyCode == kVK_ANSI_X && xIsCutPending && type == .keyUp {
+            xIsCutPending = false
+            return nil // Swallow the stale X key-up, don't send C
+        }
+        
         // Command+V with cut pending → send Cmd+Option+V (move) instead
         if keyCode == kVK_ANSI_V {
             if isCmdPressed && isCutPending && type == .keyDown {
                 // Consume the cut — one-time only
                 isCutPending = false
                 vIsCutPending = true
+                cutPasteboardChangeCount = NSPasteboard.general.changeCount
                 
                 let source = CGEventSource(stateID: .privateState)
                 source?.userData = syntheticEventTag
@@ -192,15 +200,21 @@ class EventInterceptor: ObservableObject {
                 optDown?.flags = [.maskCommand, .maskAlternate]
                 optDown?.post(tap: loc)
                 
+                usleep(1000) // 1ms delay for Finder to register modifier
+                
                 // V down
                 let vDown = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: true)
                 vDown?.flags = [.maskCommand, .maskAlternate]
                 vDown?.post(tap: loc)
                 
+                usleep(1000)
+                
                 // V up
                 let vUp = CGEvent(keyboardEventSource: source, virtualKey: kVK_ANSI_V, keyDown: false)
                 vUp?.flags = [.maskCommand, .maskAlternate]
                 vUp?.post(tap: loc)
+                
+                usleep(1000)
                 
                 // Option up
                 let optUp = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: false)
@@ -208,6 +222,13 @@ class EventInterceptor: ObservableObject {
                 optUp?.post(tap: loc)
                 
                 return nil // Swallow original Cmd+V
+            }
+            
+            // Block second Cmd+V if pasteboard still has the cut files
+            if isCmdPressed && !isCutPending && type == .keyDown 
+                && cutPasteboardChangeCount >= 0 
+                && NSPasteboard.general.changeCount == cutPasteboardChangeCount {
+                return nil // Prevent duplicate paste of cut files
             }
             
             // Swallow duplicate V events from the synthetic burst
