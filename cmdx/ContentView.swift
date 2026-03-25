@@ -15,8 +15,12 @@ class EventInterceptor: ObservableObject {
     private let kVK_ANSI_V: CGKeyCode = 0x09
     private let kVK_ANSI_C: CGKeyCode = 0x08
     
+    // Magic value to tag synthetic events we generate
+    private let syntheticEventTag: Int64 = 0xC3DEC3DE
+    
     private var activeAppBundleID: String = ""
     private var workspaceObserver: Any?
+    private var permissionTimer: Timer?
     
     init() {
         activeAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
@@ -32,6 +36,7 @@ class EventInterceptor: ObservableObject {
     }
     
     deinit {
+        stopPermissionMonitor()
         if let observer = workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
@@ -46,7 +51,10 @@ class EventInterceptor: ObservableObject {
         checkPermissions()
         guard isTrusted else { return }
         
-        // Listen for BOTH key down and key up
+        // Clean up any existing tap first
+        stop()
+        
+        // Listen for key down, key up, and flags changed
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         let pointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
         guard let tap = CGEvent.tapCreate(
@@ -69,6 +77,9 @@ class EventInterceptor: ObservableObject {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        
+        // Start monitoring for permission revocation
+        startPermissionMonitor()
     }
     
     func stop() {
@@ -76,15 +87,52 @@ class EventInterceptor: ObservableObject {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
                 CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
+                runLoopSource = nil
+            }
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+        }
+        // Reset all state
+        isCutPending = false
+        xIsCutPending = false
+        vIsCutPending = false
+    }
+    
+    // MARK: - Permission Monitoring
+    
+    private func startPermissionMonitor() {
+        permissionTimer?.invalidate()
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let trusted = AXIsProcessTrusted()
+            if !trusted && self.isTrusted {
+                // Permission was revoked — clean up gracefully
+                DispatchQueue.main.async {
+                    self.isTrusted = false
+                    self.stop()
+                }
+            } else if trusted && !self.isTrusted {
+                // Permission was re-granted
+                DispatchQueue.main.async {
+                    self.isTrusted = true
+                    self.start()
+                }
             }
         }
     }
     
+    private func stopPermissionMonitor() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+    }
+    
+    // MARK: - Event Handling
+    
     private var xIsCutPending = false
     private var vIsCutPending = false
-    private var lastCutTime = Date.distantPast
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // Re-enable tap if system disabled it due to timeout
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = self.eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -94,6 +142,12 @@ class EventInterceptor: ObservableObject {
         
         guard type == .keyDown || type == .keyUp else { return Unmanaged.passRetained(event) }
         
+        // Skip our own synthetic events to prevent infinite loops
+        if event.getIntegerValueField(.eventSourceUserData) == syntheticEventTag {
+            return Unmanaged.passRetained(event)
+        }
+        
+        // Only intercept in Finder
         if self.activeAppBundleID != "com.apple.finder" {
             return Unmanaged.passRetained(event)
         }
@@ -102,7 +156,7 @@ class EventInterceptor: ObservableObject {
         let isCmdPressed = flags.contains(.maskCommand)
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         
-        // Standard Cmd+C
+        // Standard Cmd+C — reset cut state
         if isCmdPressed && keyCode == kVK_ANSI_C && type == .keyDown {
             isCutPending = false
             xIsCutPending = false
@@ -110,7 +164,7 @@ class EventInterceptor: ObservableObject {
             return Unmanaged.passRetained(event)
         }
         
-        // Command+X
+        // Command+X → rewrite to Cmd+C and mark cut pending
         if (isCmdPressed && keyCode == kVK_ANSI_X) || (keyCode == kVK_ANSI_X && xIsCutPending) {
             if type == .keyDown {
                 isCutPending = true
@@ -122,14 +176,15 @@ class EventInterceptor: ObservableObject {
             return Unmanaged.passRetained(event)
         }
         
-        // Command+V
+        // Command+V with cut pending → send Cmd+Option+V (move) instead
         if keyCode == kVK_ANSI_V {
             if isCmdPressed && isCutPending && type == .keyDown {
+                // Consume the cut — one-time only
                 isCutPending = false
                 vIsCutPending = true
-                lastCutTime = Date()
                 
-                let source = CGEventSource(stateID: .hidSystemState)
+                let source = CGEventSource(stateID: .privateState)
+                source?.userData = syntheticEventTag
                 let loc = CGEventTapLocation.cghidEventTap
                 
                 // Option down
@@ -152,23 +207,16 @@ class EventInterceptor: ObservableObject {
                 optUp?.flags = .maskCommand
                 optUp?.post(tap: loc)
                 
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    NSPasteboard.general.clearContents()
-                }
-                
-                return nil // Swallow original hardware stroke
+                return nil // Swallow original Cmd+V
             }
             
+            // Swallow duplicate V events from the synthetic burst
             if isCmdPressed && vIsCutPending && type == .keyDown {
-                return nil 
+                return nil
             }
             
             if vIsCutPending && type == .keyUp {
                 vIsCutPending = false
-                return nil
-            }
-            
-            if isCmdPressed && type == .keyDown && Date().timeIntervalSince(lastCutTime) < 0.5 {
                 return nil
             }
         }
