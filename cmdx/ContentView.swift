@@ -229,16 +229,6 @@ class EventInterceptor: ObservableObject {
                 optUp?.flags = .maskCommand
                 optUp?.post(tap: loc)
                 
-                // Clear pasteboard after Finder completes the move
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self = self else { return }
-                    if self.cutPasteboardChangeCount >= 0 
-                        && NSPasteboard.general.changeCount == self.cutPasteboardChangeCount {
-                        NSPasteboard.general.clearContents()
-                        self.cutPasteboardChangeCount = -1
-                    }
-                }
-                
                 return nil // Swallow original Cmd+V
             }
             
