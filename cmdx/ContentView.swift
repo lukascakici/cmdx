@@ -15,6 +15,28 @@ class EventInterceptor: ObservableObject {
     private let kVK_ANSI_V: CGKeyCode = 0x09
     private let kVK_ANSI_C: CGKeyCode = 0x08
     
+    private var activeAppBundleID: String = ""
+    private var workspaceObserver: Any?
+    
+    init() {
+        activeAppBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                self?.activeAppBundleID = app.bundleIdentifier ?? ""
+            }
+        }
+    }
+    
+    deinit {
+        if let observer = workspaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+    
     func checkPermissions() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         isTrusted = AXIsProcessTrustedWithOptions(options as CFDictionary)
@@ -63,9 +85,16 @@ class EventInterceptor: ObservableObject {
     private var lastCutTime = Date.distantPast
     
     private func handleEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = self.eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passRetained(event)
+        }
+        
         guard type == .keyDown || type == .keyUp else { return Unmanaged.passRetained(event) }
         
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier != "com.apple.finder" {
+        if self.activeAppBundleID != "com.apple.finder" {
             return Unmanaged.passRetained(event)
         }
         
