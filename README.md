@@ -21,6 +21,16 @@ You can easily download and install the app from here:
 3. Launch `cmdx` from your Applications.
 4. When prompted, follow the instructions to grant **Accessibility** permissions (System Settings -> Privacy & Security -> Accessibility) so the app can detect your shortcuts.
 
+### ⚠️ Note on macOS Gatekeeper
+Because this is an open-source app and not distributed via the Mac App Store, macOS Gatekeeper might show a warning stating **"Apple could not verify 'cmdx' is free of malware..."**. 
+
+To bypass this safely:
+1. Open your **Applications** folder in Finder.
+2. **Right-click** (or Control-click) on `cmdx.app` and select **Open**.
+3. Click **Open** again in the warning dialog.
+*(Alternatively, you can run `xattr -cr /Applications/cmdx.app` in Terminal to remove the quarantine flag).*
+You only need to do this once!
+
 ## Requirements
 - macOS 13.0 or later.
 - Accessibility Permissions.
