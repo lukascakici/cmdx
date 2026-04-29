@@ -1,11 +1,10 @@
-import SwiftUI
+import AppKit
 import ApplicationServices
-import Combine
 
-class EventInterceptor: ObservableObject {
+final class EventInterceptor {
     static let shared = EventInterceptor()
-    
-    @Published var isTrusted = false
+
+    private(set) var isTrusted = false
     private var isCutPending = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -110,17 +109,17 @@ class EventInterceptor: ObservableObject {
     
     private func startPermissionMonitor() {
         permissionTimer?.invalidate()
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // 5s instead of 2s — permission state changes are user-initiated and rare,
+        // so polling less often saves wakeups across long uptime sessions.
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             let trusted = AXIsProcessTrusted()
             if !trusted && self.isTrusted {
-                // Permission was revoked — clean up gracefully
                 DispatchQueue.main.async {
                     self.isTrusted = false
                     self.stop()
                 }
             } else if trusted && !self.isTrusted {
-                // Permission was re-granted
                 DispatchQueue.main.async {
                     self.isTrusted = true
                     self.start()
@@ -148,19 +147,29 @@ class EventInterceptor: ObservableObject {
             }
             return Unmanaged.passRetained(event)
         }
-        
+
         guard type == .keyDown || type == .keyUp else { return Unmanaged.passRetained(event) }
-        
+
+        // Fast path: 99% of system keystrokes happen outside Finder. Skip them
+        // before touching any CGEvent properties or NSPasteboard, so the callback
+        // does effectively zero allocation work for unrelated apps.
+        if self.activeAppBundleID != "com.apple.finder" {
+            return Unmanaged.passRetained(event)
+        }
+
+        // Drain any Cocoa autorelease objects (NSPasteboard, CFString bridges)
+        // before the next keystroke so they don't accumulate over long uptime.
+        return autoreleasepool { () -> Unmanaged<CGEvent>? in
+            handleFinderEvent(type: type, event: event)
+        }
+    }
+
+    private func handleFinderEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Skip our own synthetic events to prevent infinite loops
         if event.getIntegerValueField(.eventSourceUserData) == syntheticEventTag {
             return Unmanaged.passRetained(event)
         }
-        
-        // Only intercept in Finder
-        if self.activeAppBundleID != "com.apple.finder" {
-            return Unmanaged.passRetained(event)
-        }
-        
+
         let flags = event.flags
         let isCmdPressed = flags.contains(.maskCommand)
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
@@ -254,74 +263,3 @@ class EventInterceptor: ObservableObject {
     }
 }
 
-struct ContentView: View {
-    @StateObject private var interceptor = EventInterceptor.shared
-    
-    var body: some View {
-        VStack(spacing: 15) {
-            Image(systemName: "scissors")
-                .imageScale(.large)
-                .foregroundColor(.accentColor)
-                .font(.system(size: 32))
-            
-            Text("cmdx")
-                .font(.headline)
-            
-            Divider()
-            
-            if interceptor.isTrusted {
-                Text("✅ Active")
-                    .foregroundColor(.green)
-                    .fontWeight(.bold)
-                Text("Ready! Use Cmd+X to cut files in Finder.")
-                    .font(.caption)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            } else {
-                Text("⚠️ Access Required")
-                    .foregroundColor(.red)
-                    .fontWeight(.bold)
-                
-                Text("Please grant accessibility permissions to detect keystrokes.")
-                    .font(.caption)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                
-                HStack(spacing: 10) {
-                    Button("Open Settings") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    
-                    Button("Check Again") {
-                        interceptor.checkPermissions()
-                        if interceptor.isTrusted {
-                            interceptor.start()
-                        }
-                    }
-                }
-                .padding(.top, 5)
-            }
-            
-            Spacer()
-            
-            Divider()
-            
-            Button("Quit cmdx") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q", modifiers: .command)
-            .padding(.bottom, 5)
-        }
-        .padding()
-        .frame(width: 260, height: interceptor.isTrusted ? 260 : 350)
-        .onAppear {
-            interceptor.start()
-        }
-    }
-}
-
-#Preview {
-    ContentView()
-}
